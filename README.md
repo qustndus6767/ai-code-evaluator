@@ -1,38 +1,28 @@
-# AI Code Pattern Evaluator
+# ⚡ AI Code Pattern Evaluator
 
-Rules-based LLM code review with edge-streamed verdicts. Paste AI-generated code, define your rubric, get per-rule scores streamed back in real time.
+A raw, opinionated TypeScript/Next.js playground built to evaluate, stress-test, and benchmark LLM-generated code. 
 
-Built as a portfolio project for the Supabase AI Tooling Engineer application.
+Most AI tools spit out textbook, generic code filled with redundant boilerplate and unnecessary comments. This tool forces LLMs to generate high-efficiency, production-grade snippets wrapped in creative edge-case optimization, using a strict, customized **Eval-First** loop.
 
-## Stack
+## 🎯 Why This Exists
+When using Claude or Cursor aggressively in real-world production, blind copy-pasting breaks architecture. This playground acts as a quality gate to score generated code against strict pragmatism rules before it hits production.
 
-- Next.js 15 (App Router) + TypeScript
-- Tailwind CSS
-- Anthropic Claude API (`claude-sonnet-4-6`)
+## ✨ Core Features
+* **Zero Textbook Code Allowed**: Evaluates logic on a pragmatism scale (real-world optimization vs. academic theory).
+* **Comment-Free Auditing**: Enforces clean, expressive code structures with absolute zero fluff/comments.
+* **Strict Prompt Constraints**: Tests LLM resilience under highly restrictive persona injection.
+* **Score & Refactor Pipeline**: Returns exact logical fault metrics and an instant, battle-tested refactored code block.
 
-## How it works
+## 🛠️ Tech Stack
+* **Framework**: Next.js (App Router)
+* **Language**: TypeScript
+* **Styling**: Tailwind CSS
+* **Engine**: Anthropic Claude / OpenAI API Wrapper
 
-1. You paste code into the bench
-2. The rubric (editable, weighted rules) is sent with the code to `/api/evaluate`
-3. The route handler forces Claude to emit structured verdicts via `tool_choice` binding
-4. Verdicts stream back as SSE and render one-by-one with a weighted aggregate score
+## 🚀 Getting Started
 
-## Key architecture decisions
-
-| Choice | Why |
-|---|---|
-| `export const runtime = 'edge'` | Zero cold start, globally distributed |
-| `tool_choice: { type: 'tool' }` | Forces structured output — no prompt-coercing, no JSON parse gambling |
-| `ReadableStream` + staggered emit | Verdict-by-verdict UX without actual streaming complexity |
-| `drainSSE` async generator | SSE consumption without blocking the event loop |
-| `useReducer` + discriminated union | Phase transitions (idle → running → done → errored) stay type-safe |
-
-## Setup
-
+### 1. Clone & Install Dependencies
 ```bash
+git clone [https://github.com/qustndus6767/ai-code-evaluator.git](https://github.com/qustndus6767/ai-code-evaluator.git)
+cd ai-code-evaluator
 npm install
-echo "ANTHROPIC_API_KEY=sk-ant-..." > .env.local
-npm run dev
-```
-
-Open [http://localhost:3000](http://localhost:3000).
