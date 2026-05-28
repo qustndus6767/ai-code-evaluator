@@ -1,36 +1,38 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# AI Code Pattern Evaluator
 
-## Getting Started
+Rules-based LLM code review with edge-streamed verdicts. Paste AI-generated code, define your rubric, get per-rule scores streamed back in real time.
 
-First, run the development server:
+Built as a portfolio project for the Supabase AI Tooling Engineer application.
+
+## Stack
+
+- Next.js 15 (App Router) + TypeScript
+- Tailwind CSS
+- Anthropic Claude API (`claude-sonnet-4-6`)
+
+## How it works
+
+1. You paste code into the bench
+2. The rubric (editable, weighted rules) is sent with the code to `/api/evaluate`
+3. The route handler forces Claude to emit structured verdicts via `tool_choice` binding
+4. Verdicts stream back as SSE and render one-by-one with a weighted aggregate score
+
+## Key architecture decisions
+
+| Choice | Why |
+|---|---|
+| `export const runtime = 'edge'` | Zero cold start, globally distributed |
+| `tool_choice: { type: 'tool' }` | Forces structured output — no prompt-coercing, no JSON parse gambling |
+| `ReadableStream` + staggered emit | Verdict-by-verdict UX without actual streaming complexity |
+| `drainSSE` async generator | SSE consumption without blocking the event loop |
+| `useReducer` + discriminated union | Phase transitions (idle → running → done → errored) stay type-safe |
+
+## Setup
 
 ```bash
+npm install
+echo "ANTHROPIC_API_KEY=sk-ant-..." > .env.local
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
-
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
-
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
-
-## Learn More
-
-To learn more about Next.js, take a look at the following resources:
-
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
-
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
-
-## Deploy on Vercel
-
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
-
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+Open [http://localhost:3000](http://localhost:3000).
