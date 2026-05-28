@@ -1,264 +1,222 @@
 'use client'
 
-import { useCallback, useReducer, useRef, useState } from 'react'
-import type { EvalAction, EvalState, Rule, Verdict } from '@/types/eval'
+import { useReducer, useRef } from 'react'
+import type { Grade, Phase, Shot } from '@/types/eval'
 
-const SCROLLS: Rule[] = [
-  { id: 'r1', label: 'No lazy comments', probe: 'No inline comments explaining self-evident code. Comments only for WHY, never WHAT.', weight: 8 },
-  { id: 'r2', label: 'Real error handling', probe: 'catch blocks must act — no bare console.log, no silent swallows, no returning null as a cop-out.', weight: 9 },
-  { id: 'r3', label: 'No magic numbers', probe: 'All numeric literals except 0 and 1 must be named constants.', weight: 7 },
-  { id: 'r4', label: 'Edge-case aware', probe: 'null, undefined, empty arrays, and boundary values are explicitly handled or rejected.', weight: 9 },
-  { id: 'r5', label: 'Tight scope', probe: 'Functions stay under ~20 lines and own exactly one responsibility.', weight: 7 },
-]
-
-const SAMPLE = `async function fetchUserData(userId) {
+const DEAD_SAMPLE = `async function getUserData(userId) {
   try {
-    // Make the API call to get user data
-    const response = await fetch(\`/api/users/\${userId}\`)
+    // Call the API to get user data
+    const response = await fetch('/api/users/' + userId)
+    // Parse the response
     const data = await response.json()
-    // Return the user
+    // Return data to caller
     return data
-  } catch (e) {
-    console.log('Error:', e)
+  } catch (error) {
+    // Log error to console
+    console.log('Error occurred:', error)
     return null
   }
 }`
 
-const ZERO_STATE: EvalState = { phase: 'idle', verdicts: [], elapsed: 0, error: null }
+type State =
+  | { phase: 'idle' }
+  | { phase: 'loading' }
+  | { phase: 'done'; shot: Shot }
+  | { phase: 'err'; msg: string }
 
-function reduce(s: EvalState, a: EvalAction): EvalState {
-  switch (a.type) {
-    case 'run/start':   return { ...ZERO_STATE, phase: 'running' }
-    case 'run/verdict': return { ...s, verdicts: [...s.verdicts, a.verdict] }
-    case 'run/done':    return { ...s, phase: 'done', elapsed: a.elapsed }
-    case 'run/error':   return { ...s, phase: 'errored', error: a.message }
-    case 'run/reset':   return ZERO_STATE
-  }
+type Action =
+  | { type: 'fire' }
+  | { type: 'land'; shot: Shot }
+  | { type: 'explode'; msg: string }
+  | { type: 'reset' }
+
+const smash = (_: State, a: Action): State => (({
+  fire:    { phase: 'loading' },
+  land:    { phase: 'done', shot: (a as Extract<Action, { type: 'land' }>).shot },
+  explode: { phase: 'err', msg: (a as Extract<Action, { type: 'explode' }>).msg },
+  reset:   { phase: 'idle' },
+} satisfies Record<Action['type'], State>)[a.type])
+
+const gradeRing: Record<Grade, string> = {
+  S: 'text-violet-400 border-violet-500',
+  A: 'text-emerald-400 border-emerald-500',
+  B: 'text-sky-400 border-sky-500',
+  C: 'text-amber-400 border-amber-500',
+  F: 'text-red-400 border-red-500',
 }
 
-async function* drainSSE(reader: ReadableStreamDefaultReader<Uint8Array>) {
-  const dec = new TextDecoder()
-  let buf = ''
-  for (;;) {
-    const { done, value } = await reader.read()
-    if (done) break
-    buf += dec.decode(value, { stream: true })
-    const parts = buf.split('\n\n')
-    buf = parts.pop() ?? ''
-    for (const p of parts) {
-      if (p.startsWith('data: ')) yield p.slice(6)
-    }
-  }
+const meterFill = (n: number, invert = false) => {
+  const v = invert ? 10 - n : n
+  return v >= 8 ? 'bg-emerald-500' : v >= 5 ? 'bg-amber-500' : 'bg-red-500'
 }
 
-function tally(verdicts: Verdict[], rules: Rule[]) {
-  if (!verdicts.length) return 0
-  const wmap = new Map(rules.map(r => [r.id, r.weight]))
-  const { n, d } = verdicts.reduce(
-    ({ n, d }, v) => {
-      const w = wmap.get(v.ruleId) ?? 1
-      return { n: n + v.score * w, d: d + w }
-    },
-    { n: 0, d: 0 }
+function Meter({ label, value, invert }: { label: string; value: number; invert?: boolean }) {
+  const display = invert ? 10 - value : value
+  return (
+    <div className="space-y-1.5">
+      <div className="flex justify-between text-xs">
+        <span className="text-zinc-400">{label}</span>
+        <span className="tabular-nums text-zinc-300">{value.toFixed(1)}</span>
+      </div>
+      <div className="h-1.5 bg-zinc-800 rounded-full overflow-hidden">
+        <div
+          className={`h-full rounded-full transition-all duration-700 ${meterFill(value, invert)}`}
+          style={{ width: `${display * 10}%` }}
+        />
+      </div>
+    </div>
   )
-  return d ? +(n / d).toFixed(1) : 0
 }
 
-const chip = (s: Verdict['severity']) =>
-  s === 'pass' ? 'border-emerald-700 bg-emerald-950/40 text-emerald-300'
-  : s === 'warn' ? 'border-amber-700 bg-amber-950/40 text-amber-300'
-  : 'border-red-700 bg-red-950/40 text-red-300'
+export default function Bench() {
+  const [state, dispatch] = useReducer(smash, { phase: 'idle' })
+  const pad = useRef<HTMLTextAreaElement>(null)
 
-const bar = (s: Verdict['severity']) =>
-  s === 'pass' ? 'bg-emerald-500' : s === 'warn' ? 'bg-amber-500' : 'bg-red-500'
+  const fire = async () => {
+    const code = pad.current?.value.trim()
+    if (!code || state.phase === 'loading') return
 
-export default function Dashboard() {
-  const [state, dispatch] = useReducer(reduce, ZERO_STATE)
-  const [rules, setRules] = useState<Rule[]>(SCROLLS)
-  const bench = useRef<HTMLTextAreaElement>(null)
-
-  const run = useCallback(async () => {
-    const code = bench.current?.value?.trim()
-    if (!code || state.phase === 'running') return
-
-    dispatch({ type: 'run/start' })
-    const t0 = Date.now()
+    dispatch({ type: 'fire' })
 
     try {
       const res = await fetch('/api/evaluate', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ code, rules }),
+        body: JSON.stringify({ code }),
       })
-
-      if (!res.ok || !res.body) throw new Error(`HTTP ${res.status}`)
-
-      for await (const token of drainSSE(res.body.getReader())) {
-        if (token === '[DONE]') {
-          dispatch({ type: 'run/done', elapsed: Date.now() - t0 })
-          break
-        }
-        try { dispatch({ type: 'run/verdict', verdict: JSON.parse(token) }) } catch {}
-      }
+      if (!res.ok) throw new Error(`HTTP ${res.status}`)
+      const shot = await res.json() as Shot
+      dispatch({ type: 'land', shot })
     } catch (e) {
-      dispatch({ type: 'run/error', message: String(e) })
+      dispatch({ type: 'explode', msg: String(e) })
     }
-  }, [rules, state.phase])
+  }
 
-  const score = tally(state.verdicts, rules)
-  const scoreHue = score >= 8 ? 'text-emerald-400' : score >= 5 ? 'text-amber-400' : 'text-red-400'
+  const phase = state.phase as Phase
 
   return (
-    <main className="min-h-screen bg-zinc-950 text-zinc-100 font-mono">
-      <header className="border-b border-zinc-800 px-6 py-4 flex items-center justify-between">
-        <div>
-          <h1 className="text-sm font-semibold tracking-widest uppercase text-zinc-300">
+    <main className="min-h-screen bg-[#0a0a0a] text-zinc-100 font-mono flex flex-col">
+      <header className="border-b border-zinc-800/60 px-6 py-3.5 flex items-center justify-between shrink-0">
+        <div className="flex items-center gap-3">
+          <div className="w-1.5 h-1.5 rounded-full bg-indigo-500" />
+          <span className="text-xs font-semibold tracking-[0.15em] uppercase text-zinc-300">
             AI Code Pattern Evaluator
-          </h1>
-          <p className="text-xs text-zinc-600 mt-0.5">Rules-based LLM code review · Edge-streamed verdicts</p>
+          </span>
         </div>
-        {state.phase !== 'idle' && (
+        {phase !== 'idle' && (
           <button
-            onClick={() => dispatch({ type: 'run/reset' })}
-            className="text-xs text-zinc-600 hover:text-zinc-300 transition-colors"
+            onClick={() => dispatch({ type: 'reset' })}
+            className="text-xs text-zinc-600 hover:text-zinc-400 transition-colors"
           >
             ← reset
           </button>
         )}
       </header>
 
-      <div className="grid grid-cols-2 h-[calc(100vh-57px)]">
-        <div className="border-r border-zinc-800 flex flex-col">
-          <div className="flex-1 flex flex-col p-4 gap-3 min-h-0">
-            <div className="flex items-center justify-between shrink-0">
-              <span className="text-xs text-zinc-500 uppercase tracking-wider">Bench</span>
+      <div className="flex-1 grid grid-cols-2 min-h-0">
+        <div className="border-r border-zinc-800/60 flex flex-col min-h-0">
+          <div className="flex-1 flex flex-col p-5 gap-3 min-h-0">
+            <div className="flex items-center justify-between">
+              <span className="text-[10px] text-zinc-600 uppercase tracking-widest">Input</span>
               <button
-                onClick={() => { if (bench.current) bench.current.value = SAMPLE }}
-                className="text-xs text-zinc-600 hover:text-zinc-400 transition-colors"
+                onClick={() => { if (pad.current) pad.current.value = DEAD_SAMPLE }}
+                className="text-[10px] text-zinc-700 hover:text-zinc-400 transition-colors"
               >
-                load sample ↓
+                load slop sample ↓
               </button>
             </div>
             <textarea
-              ref={bench}
-              placeholder="Paste AI-generated code here…"
-              className="flex-1 bg-zinc-900 border border-zinc-800 rounded-lg p-4 text-sm text-zinc-200 placeholder:text-zinc-700 resize-none focus:outline-none focus:border-zinc-600 leading-relaxed"
-              onKeyDown={e => { if (e.metaKey && e.key === 'Enter') run() }}
+              ref={pad}
+              spellCheck={false}
+              placeholder="Paste code here…"
+              className="flex-1 bg-zinc-900/60 border border-zinc-800 rounded-lg p-4 text-xs text-zinc-200 placeholder:text-zinc-700 resize-none focus:outline-none focus:border-zinc-700 leading-[1.7]"
+              onKeyDown={e => { if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') fire() }}
             />
           </div>
 
-          <div className="border-t border-zinc-800 p-4 flex flex-col gap-3 max-h-64 overflow-y-auto shrink-0">
-            <span className="text-xs text-zinc-500 uppercase tracking-wider">Rubric</span>
-            {rules.map((rule, i) => (
-              <div key={rule.id} className="grid grid-cols-[1fr_auto] gap-2 items-start">
-                <div className="space-y-1 min-w-0">
-                  <input
-                    value={rule.label}
-                    onChange={e => setRules(r => r.map((x, j) => j === i ? { ...x, label: e.target.value } : x))}
-                    className="w-full bg-transparent text-xs text-zinc-300 border-b border-zinc-800 pb-0.5 focus:outline-none focus:border-zinc-600 truncate"
-                  />
-                  <input
-                    value={rule.probe}
-                    onChange={e => setRules(r => r.map((x, j) => j === i ? { ...x, probe: e.target.value } : x))}
-                    className="w-full bg-transparent text-xs text-zinc-600 focus:outline-none truncate"
-                  />
-                </div>
-                <div className="flex items-center gap-1.5 shrink-0">
-                  <span className="text-xs text-zinc-600 w-3 text-right tabular-nums">{rule.weight}</span>
-                  <input
-                    type="range" min="1" max="10" value={rule.weight}
-                    onChange={e => setRules(r => r.map((x, j) => j === i ? { ...x, weight: +e.target.value } : x))}
-                    className="w-14 accent-indigo-500"
-                  />
-                  <button
-                    onClick={() => setRules(r => r.filter((_, j) => j !== i))}
-                    className="text-zinc-700 hover:text-red-500 transition-colors text-xs leading-none"
-                  >
-                    ✕
-                  </button>
-                </div>
-              </div>
-            ))}
+          <div className="p-5 pt-0 shrink-0">
             <button
-              onClick={() =>
-                setRules(r => [...r, { id: `r${Date.now()}`, label: 'New rule', probe: 'Describe what to check for', weight: 5 }])
-              }
-              className="text-xs text-zinc-700 hover:text-zinc-400 transition-colors text-left"
+              onClick={fire}
+              disabled={phase === 'loading'}
+              className="w-full py-2.5 text-xs font-semibold tracking-widest uppercase bg-indigo-600 hover:bg-indigo-500 disabled:bg-zinc-800 disabled:text-zinc-600 rounded-lg transition-all"
             >
-              + add rule
+              {phase === 'loading' ? (
+                <span className="flex items-center justify-center gap-2">
+                  <span className="w-3 h-3 border border-zinc-500 border-t-zinc-300 rounded-full animate-spin" />
+                  Evaluating
+                </span>
+              ) : 'Run Evaluation'}
             </button>
-          </div>
-
-          <div className="p-4 border-t border-zinc-800 shrink-0">
-            <button
-              onClick={run}
-              disabled={state.phase === 'running'}
-              className="w-full py-2.5 text-sm bg-indigo-600 hover:bg-indigo-500 disabled:bg-zinc-800 disabled:text-zinc-600 rounded-lg transition-colors font-medium tracking-wide"
-            >
-              {state.phase === 'running' ? 'Evaluating…' : 'Run Evaluation'}
-            </button>
-            <p className="text-center text-xs text-zinc-700 mt-2">⌘ + Enter</p>
+            <p className="text-center text-[10px] text-zinc-700 mt-2">⌘ + Enter</p>
           </div>
         </div>
 
-        <div className="flex flex-col p-4 gap-4 overflow-y-auto">
-          {state.phase === 'idle' && (
-            <div className="flex-1 flex items-center justify-center">
-              <p className="text-zinc-700 text-sm">Paste code → run evaluation</p>
+        <div className="flex flex-col p-5 gap-5 overflow-y-auto">
+          {phase === 'idle' && (
+            <div className="flex-1 flex flex-col items-center justify-center gap-2 text-center">
+              <p className="text-xs text-zinc-700">Drop your code in, get a verdict.</p>
+              <p className="text-[10px] text-zinc-800">No mercy. No hedging.</p>
             </div>
           )}
 
-          {(state.phase === 'running' || state.phase === 'done') && (
-            <>
-              <div className="flex items-center justify-between">
-                <span className="text-xs text-zinc-500 uppercase tracking-wider">
-                  {state.phase === 'running'
-                    ? `Evaluating ${state.verdicts.length}/${rules.length}…`
-                    : `Done · ${state.elapsed}ms`}
-                </span>
-                {state.verdicts.length > 0 && (
-                  <span className={`text-2xl font-bold tabular-nums ${scoreHue}`}>
-                    {score}
-                    <span className="text-xs text-zinc-600 font-normal">/10</span>
-                  </span>
-                )}
+          {phase === 'loading' && (
+            <div className="flex-1 flex items-center justify-center">
+              <div className="space-y-3 w-full max-w-xs">
+                {['Parsing patterns…', 'Checking for slop…', 'Calibrating ruthlessness…'].map(t => (
+                  <div key={t} className="flex items-center gap-3">
+                    <div className="w-1 h-1 rounded-full bg-zinc-700 animate-pulse" />
+                    <span className="text-xs text-zinc-700">{t}</span>
+                  </div>
+                ))}
               </div>
-
-              {state.phase === 'running' && (
-                <div className="h-0.5 bg-zinc-800 rounded-full overflow-hidden">
-                  <div
-                    className="h-full bg-indigo-500 rounded-full transition-all duration-500"
-                    style={{ width: `${(state.verdicts.length / rules.length) * 100}%` }}
-                  />
-                </div>
-              )}
-
-              <div className="space-y-3">
-                {state.verdicts.map(v => {
-                  const rule = rules.find(r => r.id === v.ruleId)
-                  return (
-                    <div key={v.ruleId} className={`border rounded-lg p-3 space-y-2 ${chip(v.severity)}`}>
-                      <div className="flex items-center justify-between">
-                        <span className="text-xs font-semibold">{rule?.label ?? v.ruleId}</span>
-                        <span className="text-sm font-bold tabular-nums">{v.score}/10</span>
-                      </div>
-                      <div className="h-1 bg-zinc-800 rounded-full overflow-hidden">
-                        <div
-                          className={`h-full rounded-full transition-all duration-700 ${bar(v.severity)}`}
-                          style={{ width: `${v.score * 10}%` }}
-                        />
-                      </div>
-                      <p className="text-xs opacity-60 leading-relaxed">{v.rationale}</p>
-                    </div>
-                  )
-                })}
-              </div>
-            </>
+            </div>
           )}
 
-          {state.phase === 'errored' && (
-            <div className="border border-red-800 bg-red-950/30 rounded-lg p-4 text-sm text-red-400">
-              {state.error}
+          {phase === 'done' && state.phase === 'done' && (() => {
+            const { shot } = state
+            return (
+              <>
+                <div className="flex items-start justify-between gap-4">
+                  <div className={`w-16 h-16 rounded-xl border-2 flex items-center justify-center shrink-0 ${gradeRing[shot.grade]}`}>
+                    <span className="text-2xl font-black">{shot.grade}</span>
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <p className="text-xs text-zinc-300 leading-relaxed">{shot.summary}</p>
+                    <div className="mt-1.5 flex items-center gap-1.5">
+                      <span className="text-[10px] text-zinc-700">composite</span>
+                      <span className={`text-lg font-bold tabular-nums ${gradeRing[shot.grade].split(' ')[0]}`}>
+                        {shot.composite.toFixed(1)}
+                      </span>
+                      <span className="text-[10px] text-zinc-700">/ 10</span>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="space-y-3 border border-zinc-800/60 rounded-lg p-4">
+                  <span className="text-[10px] text-zinc-600 uppercase tracking-widest">Scores</span>
+                  <Meter label="Scannability" value={shot.scores.scannability} />
+                  <Meter label="Pragmatic Cleverness" value={shot.scores.pragmaticCleverness} />
+                  <Meter label="Redundancy Penalty" value={shot.scores.redundancyPenalty} invert />
+                </div>
+
+                {shot.callouts.length > 0 && (
+                  <div className="space-y-2 border border-zinc-800/60 rounded-lg p-4">
+                    <span className="text-[10px] text-zinc-600 uppercase tracking-widest">Callouts</span>
+                    {shot.callouts.map((c, i) => (
+                      <div key={i} className="flex gap-2.5 items-start">
+                        <span className="text-[10px] text-zinc-700 mt-0.5 tabular-nums shrink-0">{String(i + 1).padStart(2, '0')}</span>
+                        <p className="text-xs text-zinc-400 leading-relaxed font-mono">{c}</p>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </>
+            )
+          })()}
+
+          {phase === 'err' && state.phase === 'err' && (
+            <div className="border border-red-900/50 bg-red-950/20 rounded-lg p-4 text-xs text-red-400">
+              {state.msg}
             </div>
           )}
         </div>
